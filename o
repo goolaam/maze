@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Clean Overdrive Labyrinth</title>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: 'Courier New', Courier, monospace; overflow: hidden; touch-action: none; }
+        canvas { display: block; margin: auto; }
+        #ui { position: absolute; top: 0; width: 100%; display: flex; flex-direction: column; padding: 15px; box-sizing: border-box; pointer-events: none; z-index: 10; background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent); }
+        .row { display: flex; justify-content: space-between; width: 100%; }
+        .stat { font-size: 16px; font-weight: bold; }
+        .hi-score { color: #ffeb3b; }
+        #timer-display { position: absolute; top: 50px; width: 100%; text-align: center; font-size: 42px; color: #ffeb3b; font-weight: bold; transition: transform 0.1s, color 0.2s; pointer-events: none; }
+        #level-display { position: absolute; top: 20px; width: 100%; text-align: center; font-size: 18px; opacity: 0.8; pointer-events: none; }
+        #minimap { position: absolute; top: 100px; right: 15px; width: 100px; height: 100px; background: rgba(0,0,0,0.9); border: 2px solid; pointer-events: none; }
+        #zoom-ctrl { position: absolute; bottom: 20px; left: 20px; display: flex; flex-direction: column; gap: 12px; z-index: 30; }
+        .z-btn { width: 55px; height: 55px; background: rgba(255,255,255,0.1); border: 2px solid; border-radius: 50%; font-size: 28px; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(8px); pointer-events: auto; }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,0,0,0.7); display: none; justify-content: center; align-items: center; z-index: 100; font-size: 40px; font-weight: bold; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="row">
+            <div class="stat theme-col">LOOT: <span id="score">0</span></div>
+            <div class="stat hi-score">BEST: <span id="hi-score">0</span></div>
+        </div>
+    </div>
+    <div id="level-display">LEVEL 1</div>
+    <div id="timer-display">25s</div>
+    <div id="overlay">TIME EXPIRED!</div>
+    <canvas id="minimap"></canvas>
+    <div id="zoom-ctrl">
+        <div class="z-btn theme-col theme-border" onclick="adjustZoom(0.2)">+</div>
+        <div class="z-btn theme-col theme-border" onclick="adjustZoom(-0.2)">−</div>
+    </div>
+    <canvas id="mazeCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('mazeCanvas');
+        const ctx = canvas.getContext('2d');
+        const mCanvas = document.getElementById('minimap');
+        const mCtx = mCanvas.getContext('2d');
+
+        let rows, cols, cellSize = 80, grid, goal, items = [];
+        let level = 1, score = 0, p = { x: 0, y: 0 };
+        let moveDir = { dr: 0, dc: 0 };
+        let touchStart = null, zoom = 1.3, timeLeft, timerInterval, currentTheme = "#ff3300";
+        let highScore = localStorage.getItem('mazeHiScore') || 0;
+
+        const themes = ["#ff3300", "#00ff66", "#9d00ff", "#00d2ff", "#ff0099"];
+        const emojis = ["💎", "💰", "🍎", "⭐"];
+
+        function adjustZoom(val) { zoom = Math.max(0.4, Math.min(3.5, zoom + val)); }
+
+        window.addEventListener('touchstart', (e) => {
+            if (e.target.classList.contains('z-btn')) return;
+            touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        }, {passive: false});
+
+        window.addEventListener('touchmove', (e) => {
+            if (!touchStart) return;
+            e.preventDefault();
+            const dx = e.touches[0].clientX - touchStart.x;
+            const dy = e.touches[0].clientY - touchStart.y;
+            if (Math.sqrt(dx*dx + dy*dy) > 10) {
+                if (Math.abs(dx) > Math.abs(dy)) moveDir = { dr: 0, dc: dx > 0 ? 1 : -1 };
+                else moveDir = { dr: dy > 0 ? 1 : -1, dc: 0 };
+            }
+        }, {passive: false});
+
+        window.addEventListener('touchend', () => { touchStart = null; moveDir = { dr: 0, dc: 0 }; });
+
+        function setup() {
+            const size = 12 + (level * 2);
+            rows = cols = size;
+            timeLeft = Math.floor(25 * (size / 12));
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            grid = [];
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) grid.push({r, c, walls: [true,true,true,true], v: false});
+            }
+            
+            const themeIdx = Math.floor((level - 1) / 5) % themes.length;
+            currentTheme = themes[themeIdx];
+            document.querySelectorAll('.theme-col').forEach(el => el.style.color = currentTheme);
+            document.querySelectorAll('.theme-border').forEach(el => el.style.borderColor = currentTheme);
+            mCanvas.style.borderColor = currentTheme;
+
+            generateMaze();
+            p.x = cellSize * 0.5; p.y = cellSize * 0.5;
+            goal = { r: rows-1, c: cols-1 };
+            items = [];
+            for(let i=0; i<Math.floor((rows*cols)/15); i++) {
+                items.push({r: Math.floor(Math.random()*rows), c: Math.floor(Math.random()*cols), icon: emojis[Math.floor(Math.random()*emojis.length)], type: 'loot'});
+            }
+            for(let i=0; i<Math.floor(level/2)+2; i++) {
+                items.push({r: Math.floor(Math.random()*rows), c: Math.floor(Math.random()*cols), icon: "⏰", type: 'time'});
+            }
+            document.getElementById('level-display').innerText = "LEVEL " + level;
+            startTimer();
+        }
+
+        function generateMaze() {
+            let walls = [];
+            let start = grid[0]; start.v = true;
+            const addW = (c) => {
+                if (c.r > 0) walls.push({a: c, b: grid[c.c + (c.r-1)*cols], d: 0});
+                if (c.c < cols-1) walls.push({a: c, b: grid[(c.c+1) + c.r*cols], d: 1});
+                if (c.r < rows-1) walls.push({a: c, b: grid[c.c + (c.r+1)*cols], d: 2});
+                if (c.c > 0) walls.push({a: c, b: grid[(c.c-1) + c.r*cols], d: 3});
+            };
+            addW(start);
+            while (walls.length > 0) {
+                let i = Math.floor(Math.random()*walls.length), {a, b, d} = walls[i];
+                if (!b.v) { a.walls[d] = false; b.walls[(d+2)%4] = false; b.v = true; addW(b); }
+                walls.splice(i, 1);
+            }
+        }
+
+        function startTimer() {
+            clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                const tDisp = document.getElementById('timer-display');
+                tDisp.innerText = timeLeft + "s";
+                
+                if (timeLeft <= 5) {
+                    tDisp.style.color = "#ff3300"; // Red timer for danger
+                    tDisp.style.transform = "scale(1.2)";
+                } else {
+                    tDisp.style.color = "#ffeb3b";
+                    tDisp.style.transform = "scale(1)";
+                }
+
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    document.getElementById('overlay').style.display = 'flex';
+                    score = 0; 
+                    setTimeout(() => { document.getElementById('overlay').style.display = 'none'; setup(); }, 1500);
+                }
+            }, 1000);
+        }
+
+        function moveTick() {
+            if (timeLeft > 0 && (moveDir.dr !== 0 || moveDir.dc !== 0)) {
+                let speed = 10.5;
+                let radius = 20;
+                let nudgeStrength = 4.5;
+                
+                let curR = Math.floor(p.y / cellSize);
+                let curC = Math.floor(p.x / cellSize);
+                let cell = grid[curC + curR * cols];
+
+                let targetX = p.x + moveDir.dc * speed;
+                let targetY = p.y + moveDir.dr * speed;
+
+                if (cell) {
+                    let centerX = (curC * cellSize) + (cellSize / 2);
+                    let centerY = (curR * cellSize) + (cellSize / 2);
+                    if (moveDir.dr !== 0) {
+                        if (p.x < centerX - 2) targetX += nudgeStrength;
+                        else if (p.x > centerX + 2) targetX -= nudgeStrength;
+                    }
+                    if (moveDir.dc !== 0) {
+                        if (p.y < centerY - 2) targetY += nudgeStrength;
+                        else if (p.y > centerY + 2) targetY -= nudgeStrength;
+                    }
+                    if (cell.walls[0] && targetY < (curR * cellSize) + radius) targetY = (curR * cellSize) + radius;
+                    if (cell.walls[1] && targetX > ((curC + 1) * cellSize) - radius) targetX = ((curC + 1) * cellSize) - radius;
+                    if (cell.walls[2] && targetY > ((curR + 1) * cellSize) - radius) targetY = ((curR + 1) * cellSize) - radius;
+                    if (cell.walls[3] && targetX < (curC * cellSize) + radius) targetX = (curC * cellSize) + radius;
+                }
+
+                p.x = targetX; p.y = targetY;
+
+                items = items.filter(item => {
+                    let d = Math.sqrt((p.x-(item.c*cellSize+cellSize/2))**2 + (p.y-(item.r*cellSize+cellSize/2))**2);
+                    if (d < 38) {
+                        timeLeft += 5; 
+                        if (item.type === 'loot') {
+                            score += 10; 
+                            document.getElementById('score').innerText = score;
+                            if (score > highScore) { 
+                                highScore = score; 
+                                localStorage.setItem('mazeHiScore', highScore); 
+                                document.getElementById('hi-score').innerText = highScore; 
+                            }
+                        }
+                        return false;
+                    }
+                    return true;
+                });
+
+                if (curR === goal.r && curC === goal.c) { level++; setup(); }
+            }
+            
+            draw(); drawMinimap();
+            requestAnimationFrame(moveTick);
+        }
+
+        function draw() {
+            ctx.setTransform(1,0,0,1,0,0);
+            ctx.fillStyle = "#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
+            
+            ctx.setTransform(zoom, 0, 0, zoom, -p.x * zoom + canvas.width / 2, -p.y * zoom + canvas.height / 2);
+            
+            ctx.strokeStyle = currentTheme;
+            ctx.lineWidth = 6; ctx.lineCap = "round";
+            grid.forEach(c => {
+                let x = c.c*cellSize, y = c.r*cellSize;
+                if(c.walls[0]) line(x,y,x+cellSize,y); if(c.walls[1]) line(x+cellSize,y,x+cellSize,y+cellSize);
+                if(c.walls[2]) line(x+cellSize,y+cellSize,x,y+cellSize); if(c.walls[3]) line(x,y+cellSize,x,y);
+            });
+            
+            ctx.font = "32px Arial"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            items.forEach(i => ctx.fillText(i.icon, i.c*cellSize+cellSize/2, i.r*cellSize+cellSize/2));
+            ctx.fillStyle = "#ffde00"; ctx.fillRect(goal.c*cellSize+cellSize/4, goal.r*cellSize+cellSize/4, cellSize/2, cellSize/2);
+            ctx.fillStyle = "#fff"; ctx.shadowBlur = 20; ctx.shadowColor = "#fff";
+            ctx.beginPath(); ctx.arc(p.x, p.y, 20, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+        }
+
+        function drawMinimap() {
+            mCtx.fillStyle = "#000"; mCtx.fillRect(0,0,100,100);
+            let s = 100/cols; mCtx.strokeStyle = currentTheme; mCtx.globalAlpha = 0.3;
+            grid.forEach(c => {
+                let x=c.c*s, y=c.r*s;
+                if(c.walls[0]) { mCtx.beginPath(); mCtx.moveTo(x,y); mCtx.lineTo(x+s,y); mCtx.stroke(); }
+                if(c.walls[1]) { mCtx.beginPath(); mCtx.moveTo(x+s,y); mCtx.lineTo(x+s,y+s); mCtx.stroke(); }
+                if(c.walls[2]) { mCtx.beginPath(); mCtx.moveTo(x+s,y+s); mCtx.lineTo(x,y+s); mCtx.stroke(); }
+                if(c.walls[3]) { mCtx.beginPath(); mCtx.moveTo(x,y+s); mCtx.lineTo(x,y); mCtx.stroke(); }
+            });
+            mCtx.globalAlpha = 1; mCtx.fillStyle = "#fff"; mCtx.fillRect((p.x/(cols*cellSize))*100-1, (p.y/(rows*cellSize))*100-1, 3, 3);
+        }
+        function line(x1,y1,x2,y2){ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();}
+        setup(); moveTick();
+    </script>
+</body>
+</html>
